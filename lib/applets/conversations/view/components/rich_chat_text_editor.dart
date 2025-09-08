@@ -1,5 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_quill/flutter_quill.dart';
+import 'dart:io';
+
+import 'package:dio/dio.dart';
+import 'package:lanis/utils/file_picker.dart';
+import 'package:uuid/uuid.dart';
 import 'package:lanis/applets/conversations/view/send.dart';
 
 typedef SendMessageCallback = Future<void> Function(String message);
@@ -93,6 +98,110 @@ class _RichChatTextEditorState extends State<RichChatTextEditor> {
                     },
                     icon: Icon(
                       Icons.format_textdirection_l_to_r_outlined,
+                    ),
+                    color: Theme.of(context).colorScheme.onSecondary,
+                    style: IconButton.styleFrom(
+                      backgroundColor: Theme.of(context).colorScheme.secondary,
+                    ),
+                  ),
+                ),
+              ),
+              // Upload button
+              Padding(
+                padding:
+                    const EdgeInsets.only(bottom: 2.0, left: 4.0, right: 4.0),
+                child: Material(
+                  elevation: 2.0,
+                  borderRadius: BorderRadius.circular((kToolbarHeight / 1.5)),
+                  child: IconButton(
+                    iconSize: kToolbarHeight / 1.5,
+                    onPressed: () async {
+                      // pick files (reuse existing util)
+                      final picked = await pickMultipleFiles(context, null);
+                      if (picked.isEmpty) return;
+
+                      for (final file in picked) {
+                        // quick size check (100MB)
+                        if (file.size != null &&
+                            file.size! > 100 * 1024 * 1024) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                                content:
+                                    Text('${file.name} is larger than 100MB')));
+                          }
+                          continue;
+                        }
+
+                        if (file.path == null) continue;
+
+                        try {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                                content: Text('Uploading ${file.name}...')));
+                          }
+
+                          final dio = Dio();
+                          final binId =
+                              "${DateTime.now().millisecondsSinceEpoch}-${Uuid().v4()}";
+                          final url =
+                              'https://filebin.net/$binId/${Uri.encodeComponent(file.name)}';
+
+                          // filebin expects the raw file bytes to be POSTed to /{bin}/{filename}
+                          final uploadUrl =
+                              'https://filebin.net/$binId/${Uri.encodeComponent(file.name)}';
+
+                          final bytes = await File(file.path!).readAsBytes();
+                          final contentType =
+                              file.mimeType ?? 'application/octet-stream';
+
+                          await dio.post(uploadUrl,
+                              data: bytes,
+                              options: Options(headers: {
+                                'cid': 'lanis-client',
+                                'Content-Type': contentType
+                              }, responseType: ResponseType.bytes));
+
+                          // insert a visual file widget into editor but with underlying link
+                          final filename = file.name;
+                          final promo =
+                              "Lade dir Lanis herunter um noch besser das Schulportal benutzten zu können";
+
+                          // display shows '[file] filename' but we append promo to the delta so external clients see it
+                          final displayText = '[file] $filename';
+                          final fullInsert = '$displayText\n$promo';
+                          final linkText =
+                              url; // visible to backend / copy paste
+
+                          // insert at current selection
+                          final index = quillController.selection.baseOffset;
+                          quillController.replaceText(
+                              index,
+                              0,
+                              fullInsert,
+                              TextSelection.collapsed(
+                                  offset: index + fullInsert.length));
+
+                          // add a link attribute on only the filename portion pointing to the filebin URL
+                          final filenameStart =
+                              index + displayText.indexOf(filename);
+                          quillController.formatText(filenameStart,
+                              filename.length, LinkAttribute(linkText));
+
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                                content: Text('Uploaded ${file.name}')));
+                          }
+                        } catch (e) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                                content:
+                                    Text('Failed to upload ${file.name}')));
+                          }
+                        }
+                      }
+                    },
+                    icon: Icon(
+                      Icons.attach_file,
                     ),
                     color: Theme.of(context).colorScheme.onSecondary,
                     style: IconButton.styleFrom(

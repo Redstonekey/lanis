@@ -81,6 +81,7 @@ dependencies:
       ref: 1679a59
   pdf: ^3.11.3
   html_unescape: ^2.0.0
+  open_file_manager: ^2.0.1
 
 
   # TODO: Temporary migration to flutter_secure_storage. Please remove this in the future.

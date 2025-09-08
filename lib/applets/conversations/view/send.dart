@@ -27,6 +27,13 @@ class FullScreenConversationsMessageInput extends StatefulWidget {
         current = operation.value;
       } else {
         for (MapEntry attribute in operation.attributes!.entries) {
+          // If this operation has a link attribute, use the link URL as the
+          // textual representation so outgoing messages contain the download URL
+          if (attribute.key == 'link') {
+            current = attribute.value.toString();
+            break;
+          }
+
           switch (attribute.key) {
             case "bold":
               current = "**$current**";

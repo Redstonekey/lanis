@@ -2,6 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:linkify/linkify.dart';
 import 'package:styled_text/styled_text.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'dart:io';
+
+import 'package:dio/dio.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:flutter/services.dart';
+import 'package:open_file_manager/open_file_manager.dart';
 
 import '../utils/logger.dart';
 
@@ -63,6 +69,9 @@ class FormattedText extends StatelessWidget {
   final FormatStyle formatStyle;
   const FormattedText(
       {super.key, required this.text, required this.formatStyle});
+
+  static const String _promoText =
+      "Lade dir Lanis herunter um noch besser das Schulportal benutzten zu können";
 
   /// Replaces all occurrences of map keys with their respective value
   String convertByMap(String string, Map<String, String> map) {
@@ -192,9 +201,18 @@ class FormattedText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Remove lines that contain the promo and hide the [file] token for local display
+    final displayLines = text
+        .split(RegExp(r"\r?\n"))
+        .where((l) => !l.contains(_promoText))
+        .map((l) => l.replaceAll('[file] ', ''))
+        .toList();
+
+    final displayText = displayLines.join('\n');
+
     return SelectionArea(
       child: StyledText(
-        text: convertLanisSyntax(text),
+        text: convertLanisSyntax(displayText),
         style: formatStyle.textStyle,
         tags: {
           "b": const StyledTextTag(
@@ -280,53 +298,199 @@ class FormattedText extends StatelessWidget {
                 ],
               )),
           "a": StyledTextWidgetBuilderTag((context, attributes, textContent) {
-            late final Icon icon;
-
-            if (attributes["type"] == "url") {
-              icon = Icon(Icons.link, color: formatStyle.linkForeground);
-            } else {
-              icon =
-                  Icon(Icons.email_rounded, color: formatStyle.linkForeground);
-            }
-
-            return Padding(
-              padding: const EdgeInsets.only(top: 2, bottom: 2),
-              child: InkWell(
-                onTap: () async {
-                  if (!await launchUrl(Uri.parse(attributes["href"]!))) {
-                    logger.w(
-                        '${attributes["href"]} konnte nicht geöffnet werden.');
-                  }
-                },
-                borderRadius: BorderRadius.circular(6),
-                child: Container(
-                    padding: const EdgeInsets.only(
-                        left: 7, right: 8, top: 2, bottom: 2),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(6),
-                      color: formatStyle.linkBackground,
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Padding(
-                          padding: const EdgeInsets.only(right: 4),
-                          child: icon,
-                        ),
-                        Flexible(
-                          child: Text(
-                            textContent!,
-                            style: TextStyle(color: formatStyle.linkForeground),
-                            overflow: TextOverflow.ellipsis,
-                            maxLines: 1,
-                          ),
-                        ),
-                      ],
-                    )),
-              ),
-            );
+            return _LinkWidget(
+                href: attributes['href'] ?? '',
+                textContent: textContent ?? '',
+                formatStyle: formatStyle);
           }),
         },
+      ),
+    );
+  }
+}
+
+class _LinkWidget extends StatefulWidget {
+  final String href;
+  final String textContent;
+  final FormatStyle formatStyle;
+
+  const _LinkWidget(
+      {required this.href,
+      required this.textContent,
+      required this.formatStyle});
+
+  @override
+  State<_LinkWidget> createState() => _LinkWidgetState();
+}
+
+class _LinkWidgetState extends State<_LinkWidget> {
+  String? downloadedPath;
+  late final String filename;
+
+  @override
+  void initState() {
+    super.initState();
+    final uri = Uri.tryParse(widget.href);
+    filename = (uri != null && uri.pathSegments.isNotEmpty)
+        ? uri.pathSegments.last
+        : 'downloaded_file';
+    _checkDownloaded();
+  }
+
+  Future<Directory> _lanisDownloadDir() async {
+    Directory base;
+    try {
+      if (Platform.isAndroid) {
+        // Ask native Android for the public Downloads directory path
+        const platform = MethodChannel('io.github.lanis-mobile/storage');
+        try {
+          final String? downloadsPath =
+              await platform.invokeMethod('getDownloadsPath');
+          if (downloadsPath != null && downloadsPath.isNotEmpty) {
+            base = Directory(downloadsPath);
+          } else {
+            base = (await getDownloadsDirectory()) ??
+                await getApplicationDocumentsDirectory();
+          }
+        } catch (_) {
+          base = (await getDownloadsDirectory()) ??
+              await getApplicationDocumentsDirectory();
+        }
+      } else {
+        base = (await getDownloadsDirectory()) ??
+            await getApplicationDocumentsDirectory();
+      }
+    } catch (_) {
+      base = await getApplicationDocumentsDirectory();
+    }
+    final dir = Directory('${base.path}${Platform.pathSeparator}lanis');
+    if (!await dir.exists()) await dir.create(recursive: true);
+    return dir;
+  }
+
+  Future<void> _checkDownloaded() async {
+    final dir = await _lanisDownloadDir();
+    final f = File('${dir.path}${Platform.pathSeparator}$filename');
+    if (await f.exists()) {
+      setState(() => downloadedPath = f.path);
+    }
+  }
+
+  Future<void> _download() async {
+    final href = widget.href;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('Download gestartet')));
+    try {
+      final dio = Dio();
+      final resp = await dio.get<List<int>>(href,
+          options: Options(responseType: ResponseType.bytes));
+      final dir = await _lanisDownloadDir();
+      final filePath = '${dir.path}${Platform.pathSeparator}$filename';
+      final file = File(filePath);
+      await file.writeAsBytes(resp.data!);
+      setState(() => downloadedPath = filePath);
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Gespeichert: $filePath')));
+    } catch (e) {
+      logger.w('Download fehlgeschlagen: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Download fehlgeschlagen')));
+    }
+  }
+
+  void _openFolder() async {
+    if (downloadedPath == null) return;
+    final folder = File(downloadedPath!).parent.path;
+    try {
+      if (Platform.isWindows) {
+        await Process.run('explorer', [folder]);
+      } else if (Platform.isMacOS) {
+        await Process.run('open', [folder]);
+      } else if (Platform.isAndroid) {
+        // Use open_file_manager with a config to open a suitable view.
+        // The Android package does not reliably accept arbitrary filesystem
+        // paths, so use a recent view and rely on iOS to open the exact path.
+        try {
+          // First try the plugin with 'other' folder type and an explicit path.
+          await openFileManager(
+            androidConfig: AndroidConfig(
+              folderType: AndroidFolderType.other,
+              folderPath: folder,
+            ),
+            iosConfig: IosConfig(
+              folderPath: folder,
+            ),
+          );
+        } catch (e) {
+          logger
+              .w('openFileManager failed, falling back to platform method: $e');
+          // Fallback: use our platform channel which creates a marker file and
+          // invokes a chooser; this can be more reliable across different
+          // file manager apps.
+          try {
+            const platform = MethodChannel('io.github.lanis-mobile/storage');
+            await platform.invokeMethod('openFolder', {'path': folder});
+          } catch (e2) {
+            logger.w('Platform openFolder also failed: $e2');
+            // As last resort open generic file manager view
+            await openFileManager();
+          }
+        }
+      } else if (Platform.isIOS) {
+        // On iOS open the folder path via open_file_manager isn't reliable; fall back to Process.run
+        await Process.run('open', [folder]);
+      } else {
+        await Process.run('xdg-open', [folder]);
+      }
+    } catch (e) {
+      logger.w('Could not open folder: $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final icon = Icon(Icons.link, color: widget.formatStyle.linkForeground);
+    return Padding(
+      padding: const EdgeInsets.only(top: 2, bottom: 2),
+      child: InkWell(
+        onTap: () async {
+          if (!await launchUrl(Uri.parse(widget.href))) {
+            logger.w('${widget.href} konnte nicht geöffnet werden.');
+          }
+        },
+        borderRadius: BorderRadius.circular(6),
+        child: Container(
+          padding: const EdgeInsets.only(left: 7, right: 8, top: 2, bottom: 2),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(6),
+            color: widget.formatStyle.linkBackground,
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(padding: const EdgeInsets.only(right: 4), child: icon),
+              Flexible(
+                child: Text(widget.textContent,
+                    style: TextStyle(color: widget.formatStyle.linkForeground),
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 1),
+              ),
+              const SizedBox(width: 8),
+              if (downloadedPath == null)
+                IconButton(
+                  icon: Icon(Icons.download_rounded,
+                      size: 18, color: widget.formatStyle.linkForeground),
+                  onPressed: _download,
+                )
+              else
+                IconButton(
+                  icon: Icon(Icons.folder_open_rounded,
+                      size: 18, color: widget.formatStyle.linkForeground),
+                  onPressed: _openFolder,
+                )
+            ],
+          ),
+        ),
       ),
     );
   }
